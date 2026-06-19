@@ -95,9 +95,13 @@ func isTransferEnabled(ctx context.Context) bool {
 	setting, err := models.SettingModel.FindOne(ctx, bson.M{"name": models.SettingTransferEnabled})
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
+			now := time.Now()
 			newSetting := models.SettingModel.New()
+			newSetting.ID = newUUID()
 			newSetting.Name = models.SettingTransferEnabled
 			newSetting.Value = false
+			newSetting.CreatedAt = now
+			newSetting.UpdatedAt = now
 			models.SettingModel.Create(ctx, newSetting)
 			log.Println("⚙️  Created 'transfer_enabled' = false")
 		}
