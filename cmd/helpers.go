@@ -168,6 +168,40 @@ func s3ObjectKey(fileID, fileName string) string {
 	return fmt.Sprintf("%s/%s", fileID, fileName)
 }
 
+var transcodedResolutions = []string{
+	models.Resolution1080,
+	models.Resolution720,
+	models.Resolution480,
+	models.Resolution360,
+}
+
+// needsPendingAssetInstall returns true when pending ingests exist for assets
+// that do not yet have a global media record (one resolution = one media).
+func needsPendingAssetInstall(ctx context.Context, fileID string) bool {
+	if hasPendingSpriteIngest(ctx, fileID) && !hasThumbnailMedia(ctx, fileID) {
+		return true
+	}
+	for _, res := range transcodedResolutions {
+		if hasVideoMedia(ctx, fileID, res) {
+			continue
+		}
+		if hasPendingIngestForFileName(ctx, fileID, models.ResolutionToFileName[res]) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPendingIngestForFileName(ctx context.Context, fileID, fileName string) bool {
+	count, _ := models.IngestModel.CountDocuments(ctx, bson.M{
+		"fileId":     fileID,
+		"fileName":   fileName,
+		"sourceType": models.IngestSourceTypeProcessed,
+		"deletedAt":  bson.M{"$exists": false},
+	})
+	return count > 0
+}
+
 // hasVideoMedia checks medias collection globally (any storage) for this resolution.
 func hasVideoMedia(ctx context.Context, fileID, resolution string) bool {
 	count, _ := models.MediaModel.CountDocuments(ctx, bson.M{
@@ -185,6 +219,16 @@ func hasThumbnailMedia(ctx context.Context, fileID string) bool {
 		"fileId":    fileID,
 		"type":      models.MediaTypeThumbnail,
 		"deletedAt": bson.M{"$exists": false},
+	})
+	return count > 0
+}
+
+func hasPendingSpriteIngest(ctx context.Context, fileID string) bool {
+	count, _ := models.IngestModel.CountDocuments(ctx, bson.M{
+		"fileId":     fileID,
+		"fileName":   models.SpriteZipName,
+		"sourceType": models.IngestSourceTypeProcessed,
+		"deletedAt":  bson.M{"$exists": false},
 	})
 	return count > 0
 }

@@ -30,20 +30,22 @@ var allResolutions = []string{
 }
 
 func findAndClaimFile(ctx context.Context) (*models.VideoProcess, *models.File, error) {
-	destStorageID := config.AppConfig.StorageId
-	if destStorageID == "" {
+	if config.AppConfig.StorageId == "" {
 		return nil, nil, fmt.Errorf("STORAGE_ID not configured")
 	}
 
 	filter := bson.M{
-		"status":             models.FileStatusReadyOriginal,
+		"status": bson.M{"$in": []string{
+			models.FileStatusReadyOriginal,
+			models.FileStatusReady,
+		}},
 		"type":               models.FileTypeVideo,
 		"clonedFrom":         bson.M{"$exists": false},
 		"metadata.trashedAt": bson.M{"$exists": false},
 		"metadata.deletedAt": bson.M{"$exists": false},
 	}
 
-	opts := options.Find().SetSort(bson.D{{Key: "createdAt", Value: 1}}).SetLimit(20)
+	opts := options.Find().SetSort(bson.D{{Key: "createdAt", Value: 1}}).SetLimit(200)
 	cursor, err := models.FileModel.FindRaw(ctx, filter, opts)
 	if err != nil {
 		return nil, nil, err
@@ -56,44 +58,8 @@ func findAndClaimFile(ctx context.Context) (*models.VideoProcess, *models.File, 
 			continue
 		}
 
-		if !needsTransfer(ctx, file.ID) {
-			continue
-		}
-
-		ingestCount, _ := models.IngestModel.CountDocuments(ctx, bson.M{
-			"fileId":     file.ID,
-			"sourceType": models.IngestSourceTypeProcessed,
-			"deletedAt":  bson.M{"$exists": false},
-		})
-		if ingestCount == 0 {
-			continue
-		}
-
-		ingest, err := models.IngestModel.FindOne(ctx, bson.M{
-			"fileId":     file.ID,
-			"sourceType": models.IngestSourceTypeProcessed,
-			"deletedAt":  bson.M{"$exists": false},
-		})
-		if err != nil {
-			continue
-		}
-		if ingest.StorageID == nil || *ingest.StorageID == "" {
-			continue
-		}
-		s3Storage, err := models.StorageModel.FindByID(ctx, *ingest.StorageID)
-		if err != nil || s3Storage.Type != models.StorageTypeS3 || !s3Storage.IsOnline() {
-			continue
-		}
-
-		activeCount, _ := models.VideoProcessModel.CountDocuments(ctx, bson.M{
-			"fileId":      file.ID,
-			"processType": models.ProcessTypeTransfer,
-			"status": bson.M{"$in": []string{
-				models.ProcessStatusProcessing,
-				models.ProcessStatusFailed,
-			}},
-		})
-		if activeCount > 0 {
+		reason := transferBlockReason(ctx, &file)
+		if reason != "" {
 			continue
 		}
 
@@ -102,9 +68,104 @@ func findAndClaimFile(ctx context.Context) (*models.VideoProcess, *models.File, 
 			log.Printf("⚠️  [%s] Claim failed: %v", file.Slug, err)
 			continue
 		}
+		if file.Status == models.FileStatusReady {
+			log.Printf("🖼️  [%s] Claimed for pending asset install (skip resolutions that already have media)", file.Slug)
+		}
 		return process, &file, nil
 	}
 	return nil, nil, nil
+}
+
+// transferBlockReason returns why a file cannot be claimed (empty = ok).
+func transferBlockReason(ctx context.Context, file *models.File) string {
+	if !needsTransfer(ctx, file.ID) {
+		return "no_pending_ingest"
+	}
+
+	if file.Status == models.FileStatusReady {
+		if !needsPendingAssetInstall(ctx, file.ID) {
+			return "ready_all_assets_have_media"
+		}
+	}
+
+	ingest, err := models.IngestModel.FindOne(ctx, bson.M{
+		"fileId":     file.ID,
+		"sourceType": models.IngestSourceTypeProcessed,
+		"deletedAt":  bson.M{"$exists": false},
+	})
+	if err != nil {
+		return "ingest_not_found"
+	}
+	if ingest.StorageID == nil || *ingest.StorageID == "" {
+		return "ingest_no_storage"
+	}
+	s3Storage, err := models.StorageModel.FindByID(ctx, *ingest.StorageID)
+	if err != nil || s3Storage.Type != models.StorageTypeS3 || !s3Storage.IsOnline() {
+		return "s3_offline"
+	}
+
+	activeCount, _ := models.VideoProcessModel.CountDocuments(ctx, bson.M{
+		"fileId":      file.ID,
+		"processType": models.ProcessTypeTransfer,
+		"status": bson.M{"$in": []string{
+			models.ProcessStatusProcessing,
+			models.ProcessStatusFailed,
+		}},
+	})
+	if activeCount > 0 {
+		return "active_transfer_process"
+	}
+	return ""
+}
+
+// logIdleDiagnostics explains why no job was claimed (logged periodically).
+func logIdleDiagnostics(ctx context.Context) {
+	if config.AppConfig.StorageId == "" {
+		log.Println("💤 Idle — STORAGE_ID not configured")
+		return
+	}
+
+	readyOrig, _ := models.FileModel.CountDocuments(ctx, bson.M{
+		"status": models.FileStatusReadyOriginal, "type": models.FileTypeVideo,
+		"clonedFrom": bson.M{"$exists": false},
+		"metadata.trashedAt": bson.M{"$exists": false},
+		"metadata.deletedAt": bson.M{"$exists": false},
+	})
+	readySprite, _ := models.FileModel.CountDocuments(ctx, bson.M{
+		"status": models.FileStatusReady, "type": models.FileTypeVideo,
+		"clonedFrom": bson.M{"$exists": false},
+		"metadata.trashedAt": bson.M{"$exists": false},
+		"metadata.deletedAt": bson.M{"$exists": false},
+	})
+
+	var eligible, blocked int
+	cursor, err := models.FileModel.FindRaw(ctx, bson.M{
+		"status": bson.M{"$in": []string{models.FileStatusReadyOriginal, models.FileStatusReady}},
+		"type": models.FileTypeVideo,
+		"clonedFrom": bson.M{"$exists": false},
+		"metadata.trashedAt": bson.M{"$exists": false},
+		"metadata.deletedAt": bson.M{"$exists": false},
+	}, options.Find().SetSort(bson.D{{Key: "createdAt", Value: 1}}).SetLimit(200))
+	if err == nil {
+		defer cursor.Close(ctx)
+		for cursor.Next(ctx) {
+			var file models.File
+			if cursor.Decode(&file) != nil {
+				continue
+			}
+			reason := transferBlockReason(ctx, &file)
+			if reason == "" {
+				eligible++
+				log.Printf("✅ [%s] eligible for transfer (%s)", file.Slug, file.Status)
+			} else if reason != "no_pending_ingest" && reason != "ready_all_assets_have_media" {
+				blocked++
+				log.Printf("🔒 [%s] blocked: %s", file.Slug, reason)
+			}
+		}
+	}
+
+	log.Printf("💤 Idle — ready_original: %d | ready (sprite): %d | eligible: %d | blocked: %d",
+		readyOrig, readySprite, eligible, blocked)
 }
 
 func claimFile(ctx context.Context, file *models.File) (*models.VideoProcess, error) {
@@ -207,8 +268,10 @@ func runTransfer(ctx context.Context, process *models.VideoProcess) error {
 		fileName := models.ResolutionToFileName[res]
 
 		if hasVideoMedia(ctx, fileID, res) {
-			log.Printf("⏭️  [%s] %s media exists (other storage) — skip download", slug, res)
-			transferredAssets = append(transferredAssets, fileName)
+			log.Printf("⏭️  [%s] %s media already exists — skip download", slug, res)
+			if hasPendingIngestForFileName(ctx, fileID, fileName) {
+				transferredAssets = append(transferredAssets, fileName)
+			}
 			continue
 		}
 
@@ -239,8 +302,10 @@ func runTransfer(ctx context.Context, process *models.VideoProcess) error {
 	spriteZipPath := filepath.Join(workDir, models.SpriteZipName)
 	hasSpriteZip := false
 	if hasThumbnailMedia(ctx, fileID) {
-		log.Printf("⏭️  [%s] thumbnail media exists (other storage) — skip sprite.zip", slug)
-		transferredAssets = append(transferredAssets, models.SpriteZipName)
+		log.Printf("⏭️  [%s] thumbnail media already exists — skip sprite.zip", slug)
+		if hasPendingSpriteIngest(ctx, fileID) {
+			transferredAssets = append(transferredAssets, models.SpriteZipName)
+		}
 	} else {
 		spriteKey := s3ObjectKey(fileID, models.SpriteZipName)
 		if exists, _ := downloader.ObjectExists(s3Storage, spriteKey); exists {
@@ -254,11 +319,32 @@ func runTransfer(ctx context.Context, process *models.VideoProcess) error {
 		}
 	}
 
+	if len(downloadedRes) == 0 && !hasSpriteZip {
+		for _, res := range allResolutions {
+			fileName := models.ResolutionToFileName[res]
+			if hasVideoMedia(ctx, fileID, res) && hasPendingIngestForFileName(ctx, fileID, fileName) {
+				transferredAssets = append(transferredAssets, fileName)
+			}
+		}
+		if hasThumbnailMedia(ctx, fileID) && hasPendingSpriteIngest(ctx, fileID) {
+			transferredAssets = append(transferredAssets, models.SpriteZipName)
+		}
+		if len(transferredAssets) == 0 {
+			failProcess(ctx, process.ID, slug, "nothing to transfer on S3")
+			return fmt.Errorf("nothing to transfer")
+		}
+		log.Printf("⏭️  [%s] All assets already have media — cleaning up stale ingests", slug)
+	}
+
 	if !hasVideoMedia(ctx, fileID, models.ResolutionOriginal) {
 		originalPath := filepath.Join(workDir, models.FileNameOriginal)
 		if _, err := os.Stat(originalPath); err != nil {
-			failProcess(ctx, process.ID, slug, "file_original.mp4 not found on S3 ingest")
-			return fmt.Errorf("original missing on S3")
+			if hasSpriteZip && file.Status == models.FileStatusReady {
+				log.Printf("🖼️  [%s] Sprite-only transfer — skipping original video re-download", slug)
+			} else {
+				failProcess(ctx, process.ID, slug, "file_original.mp4 not found on S3 ingest")
+				return fmt.Errorf("original missing on S3")
+			}
 		}
 	}
 
@@ -328,10 +414,7 @@ func runTransfer(ctx context.Context, process *models.VideoProcess) error {
 	storageIDPtr := storageID
 
 	for _, res := range installedRes {
-		if count, _ := models.MediaModel.CountDocuments(ctx, bson.M{
-			"fileId": fileID, "type": models.MediaTypeVideo, "resolution": res,
-			"deletedAt": bson.M{"$exists": false},
-		}); count > 0 {
+		if hasVideoMedia(ctx, fileID, res) {
 			continue
 		}
 		fileName := models.ResolutionToFileName[res]
@@ -354,10 +437,7 @@ func runTransfer(ctx context.Context, process *models.VideoProcess) error {
 	}
 
 	if hasSprite {
-		if count, _ := models.MediaModel.CountDocuments(ctx, bson.M{
-			"fileId": fileID, "type": models.MediaTypeThumbnail,
-			"deletedAt": bson.M{"$exists": false},
-		}); count == 0 {
+		if !hasThumbnailMedia(ctx, fileID) {
 			var totalSpriteSize int64
 			spriteDest := filepath.Join(storagePath, fileID, "sprite")
 			if entries, err := os.ReadDir(spriteDest); err == nil {
@@ -408,7 +488,11 @@ func runTransfer(ctx context.Context, process *models.VideoProcess) error {
 	success = true
 	models.VideoProcessModel.DeleteByID(ctx, process.ID)
 
-	utils.LogMain("✅ [%s] TRANSFER COMPLETE → ready", slug)
+	if hasSpriteZip && file.Status == models.FileStatusReady {
+		utils.LogMain("✅ [%s] SPRITE HANDOFF COMPLETE", slug)
+	} else {
+		utils.LogMain("✅ [%s] TRANSFER COMPLETE → ready", slug)
+	}
 	return nil
 }
 

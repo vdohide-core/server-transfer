@@ -7,12 +7,15 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"server-transfer/internal/config"
 	"server-transfer/internal/db/database"
 	"server-transfer/internal/db/models"
+	"server-transfer/internal/handlers"
 	"server-transfer/internal/logger"
+	"server-transfer/internal/middleware"
 	"server-transfer/internal/utils"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -47,22 +50,34 @@ func main() {
 
 	port := config.AppConfig.Port
 	if port == "" {
-		port = "8084"
+		port = "8085"
 	}
+
+	logDir := filepath.Dir(config.AppConfig.LogPath)
+	h := handlers.NewHandler(handlers.Handler{LogDir: logDir})
+	go handlers.GlobalHub.Run()
+	go handlers.WatchLogDir(logDir)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok","service":"server-transfer","worker":"%s"}`, workerID)
+	})
+	mux.HandleFunc("/logs", h.HandleLogList)
+	mux.HandleFunc("/logs/", h.HandleLogFile)
+	mux.HandleFunc("/ui", h.HandleUI)
+	mux.HandleFunc("/ws", h.HandleWS)
+
 	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"status":"ok","service":"server-transfer","worker":"%s"}`, workerID)
-		})
 		ln, err := net.Listen("tcp", ":"+port)
 		if err != nil {
-			log.Printf("Health check skipped (port %s in use by another worker)", port)
+			log.Printf("📋 Log viewer skipped (port %s in use)", port)
 			return
 		}
-		log.Printf("Health: http://localhost:%s/health", port)
-		if err := http.Serve(ln, mux); err != nil && err != http.ErrServerClosed {
-			log.Printf("HTTP server error: %v", err)
+		server := &http.Server{Handler: middleware.CORS(mux)}
+		log.Printf("🌐 Log viewer: http://localhost:%s/ui", port)
+		if err := server.Serve(ln); err != http.ErrServerClosed {
+			log.Printf("⚠️ HTTP server error: %v", err)
 		}
 	}()
 
@@ -72,20 +87,49 @@ func main() {
 
 func startWorkerLoop() {
 	log.Println("⚡ Worker Mode: Polling for transfer jobs...")
+	log.Printf("🆔 Worker ID: %s", workerID)
+	if config.AppConfig.StorageId != "" {
+		log.Printf("📦 Local storage: %s → %s", config.AppConfig.StorageId, config.AppConfig.StoragePath)
+	}
 	utils.CleanOldLogs()
 
 	ctx := context.Background()
+	if isTransferEnabled(ctx) {
+		log.Println("✅ transfer_enabled=true")
+	} else {
+		log.Println("⏸️  transfer_enabled=false — enable in db.settings")
+	}
+
 	const pollBusy = 5 * time.Second
 	const pollIdle = 30 * time.Second
+	idleRounds := 0
+	var lastDisabledLog time.Time
 
 	for {
-		if !isTransferEnabled(ctx) || !isWorkerEnabled(ctx) {
+		if !isTransferEnabled(ctx) {
+			if time.Since(lastDisabledLog) > 5*time.Minute {
+				log.Println("⏸️  transfer_enabled=false — set db.settings.transfer_enabled=true")
+				lastDisabledLog = time.Now()
+			}
+			time.Sleep(pollIdle)
+			continue
+		}
+		if !isWorkerEnabled(ctx) {
+			if time.Since(lastDisabledLog) > 5*time.Minute {
+				log.Printf("⏸️  worker %s disabled in db.workers", workerID)
+				lastDisabledLog = time.Now()
+			}
 			time.Sleep(pollIdle)
 			continue
 		}
 		if processNextJob(ctx) {
+			idleRounds = 0
 			time.Sleep(pollBusy)
 		} else {
+			idleRounds++
+			if idleRounds == 1 || idleRounds%10 == 0 {
+				logIdleDiagnostics(ctx)
+			}
 			time.Sleep(pollIdle)
 		}
 	}
