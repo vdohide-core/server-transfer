@@ -15,7 +15,7 @@ UNINSTALL=false
 MONGODB_URI=""
 STORAGE_ID=""
 STORAGE_PATH="/home/files"
-PORT=8084
+PORT=8085
 
 APP_NAME="server-transfer"
 APP_DIR="/opt/$APP_NAME"
