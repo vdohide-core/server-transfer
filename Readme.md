@@ -204,7 +204,7 @@ install.sh ... -n 3
 
 | หัวข้อ | พฤติกรรม |
 |---|---|
-| ไฟล์เดียวกัน | **ไม่รับซ้ำ** — unique index `video_process.fileId` |
+| ไฟล์เดียวกัน | **ไม่รับซ้ำ** — unique index `video_process.{fileId,processType}` |
 | คนละไฟล์ | ทำงานพร้อมกันได้ |
 | Health port | worker แรก bind `:8084` worker อื่นข้าม (worker loop ยังทำงาน) |
 

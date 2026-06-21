@@ -115,6 +115,15 @@ func transferBlockReason(ctx context.Context, file *models.File) string {
 	if activeCount > 0 {
 		return "active_transfer_process"
 	}
+
+	otherActive, _ := models.VideoProcessModel.CountDocuments(ctx, bson.M{
+		"fileId":      file.ID,
+		"processType": bson.M{"$ne": models.ProcessTypeTransfer},
+		"status":      models.ProcessStatusProcessing,
+	})
+	if otherActive > 0 {
+		return "other_service_processing"
+	}
 	return ""
 }
 
