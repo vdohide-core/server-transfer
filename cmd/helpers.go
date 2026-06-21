@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 func newUUID() string { return uuid.New().String() }
@@ -280,5 +281,79 @@ func categorizeError(errMsg string) string {
 		return "thumbnail"
 	default:
 		return "unknown"
+	}
+}
+
+func isPurgeResolution(res string) bool {
+	switch res {
+	case models.Resolution360, models.Resolution480, models.Resolution720, models.Resolution1080:
+		return true
+	default:
+		return false
+	}
+}
+
+// purgePlaylistCache purges playlist.m3u8 from Cloudflare for the file and its clones.
+func purgePlaylistCache(ctx context.Context, slug, fileID string) {
+	domainSetting, err := models.SettingModel.FindOne(ctx, bson.M{"name": models.SettingDomainPlaylist})
+	if err != nil {
+		return
+	}
+	domain := domainSetting.GetString("")
+	if domain == "" {
+		return
+	}
+	if !strings.HasPrefix(domain, "http://") && !strings.HasPrefix(domain, "https://") {
+		domain = "https://" + domain
+	}
+	domain = strings.TrimRight(domain, "/")
+
+	zoneSetting, err := models.SettingModel.FindOne(ctx, bson.M{"name": models.SettingCfZoneID})
+	if err != nil {
+		return
+	}
+	tokenSetting, err := models.SettingModel.FindOne(ctx, bson.M{"name": models.SettingCfApiToken})
+	if err != nil {
+		return
+	}
+
+	cfConfig := utils.CloudflareConfig{
+		ZoneID:   zoneSetting.GetString(""),
+		APIToken: tokenSetting.GetString(""),
+	}
+	if cfConfig.ZoneID == "" || cfConfig.APIToken == "" {
+		return
+	}
+
+	purgeURLs := []string{fmt.Sprintf("%s/%s/playlist.m3u8", domain, slug)}
+
+	cursor, err := models.FileModel.FindRaw(ctx, bson.M{
+		"clonedFrom":         fileID,
+		"type":               models.FileTypeVideo,
+		"metadata.trashedAt": bson.M{"$exists": false},
+		"metadata.deletedAt": bson.M{"$exists": false},
+	}, options.Find().SetProjection(bson.M{"slug": 1}))
+	if err == nil {
+		defer cursor.Close(ctx)
+		for cursor.Next(ctx) {
+			var clonedFile models.File
+			if err := cursor.Decode(&clonedFile); err != nil {
+				continue
+			}
+			if clonedFile.Slug != "" {
+				purgeURLs = append(purgeURLs, fmt.Sprintf("%s/%s/playlist.m3u8", domain, clonedFile.Slug))
+			}
+		}
+	}
+
+	log.Printf("☁️  [%s] Purging %d playlist URL(s) from Cloudflare cache...", slug, len(purgeURLs))
+	for _, u := range purgeURLs {
+		log.Printf("   → %s", u)
+	}
+
+	if err := utils.PurgeCloudflareCache(cfConfig, purgeURLs); err != nil {
+		log.Printf("⚠️  [%s] Cloudflare purge failed: %v", slug, err)
+	} else {
+		log.Printf("✅ [%s] Cloudflare cache purged", slug)
 	}
 }

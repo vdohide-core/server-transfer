@@ -434,6 +434,9 @@ func runTransfer(ctx context.Context, process *models.VideoProcess) error {
 		models.MediaModel.Create(ctx, &media)
 		cloneMediaToClonedFiles(ctx, fileID, media, slug)
 		log.Printf("✅ [%s] Media record: %s", slug, res)
+		if isPurgeResolution(res) {
+			purgePlaylistCache(ctx, slug, fileID)
+		}
 	}
 
 	if hasSprite {
