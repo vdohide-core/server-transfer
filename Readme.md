@@ -86,7 +86,7 @@ journalctl -u "server-transfer@1" -f
 for i in $(seq 1 2); do systemctl restart server-transfer@$i; done
 ```
 
-แต่ละ instance ได้ `WORKER_ID={hostname}@{n}` อัตโนมัติจาก systemd (`server-transfer@1`, `@2`, ...)
+แต่ละ instance ได้ `WORKER_ID=transfer_{hostname}@{n}` อัตโนมัติจาก systemd (`server-transfer@1`, `@2`, ...)
 
 ---
 
@@ -98,7 +98,7 @@ STORAGE_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 STORAGE_PATH=/home/files
 PORT=8084
 LOG_PATH=logs/server-transfer.log
-WORKER_ID=storage1@1
+WORKER_ID=transfer_storage1@1
 ```
 
 | Variable | Description | Default |
@@ -108,7 +108,7 @@ WORKER_ID=storage1@1
 | `STORAGE_PATH` | path เก็บไฟล์บน disk | `/home/files` |
 | `PORT` | Health check HTTP port | `8084` |
 | `LOG_PATH` | Rotating log file path | `logs/server-transfer.log` |
-| `WORKER_ID` | Worker identifier (ต้องไม่ซ้ำต่อ process) | `{hostname}@1` |
+| `WORKER_ID` | Worker identifier (ต้องไม่ซ้ำต่อ process) | `transfer_{hostname}@1` |
 
 ### เปิดใช้งาน worker
 
@@ -199,7 +199,7 @@ medias.find({ fileId, resolution, deletedAt: null })
 # ติดตั้ง 3 workers
 install.sh ... -n 3
 # → server-transfer@1, @2, @3
-# → WORKER_ID=hostname@1, hostname@2, hostname@3
+# → WORKER_ID=transfer_hostname@1, transfer_hostname@2, transfer_hostname@3
 ```
 
 | หัวข้อ | พฤติกรรม |

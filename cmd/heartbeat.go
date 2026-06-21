@@ -17,7 +17,7 @@ import (
 
 func startHeartbeat(wID string) {
 	log.Printf("💓 Starting heartbeat (workerId=%s)", wID)
-	hostname, pid := parseWorkerID(wID)
+	workerType, hostname, pid := parseWorkerID(wID)
 	ip := getOutboundIP()
 
 	doHeartbeat := func() {
@@ -36,7 +36,7 @@ func startHeartbeat(wID string) {
 		filter := bson.M{"workerId": wID}
 		update := bson.M{
 			"$set": bson.M{
-				"hostname": hostname, "ip": ip, "pid": pid, "type": "transfer",
+				"hostname": hostname, "ip": ip, "pid": pid, "type": workerType,
 				"status": status, "activeJobs": activeJobs, "maxJobs": 1,
 				"system": sys, "heartbeatAt": now, "updatedAt": now,
 			},
@@ -55,9 +55,22 @@ func startHeartbeat(wID string) {
 	}
 }
 
-func parseWorkerID(wID string) (string, int) {
+// parseWorkerID splits "type_hostname@n" into worker type, hostname, and pid.
+// Supports legacy "hostname@n" (type defaults to "transfer").
+func parseWorkerID(wID string) (workerType, hostname string, pid int) {
 	parts := strings.SplitN(wID, "@", 2)
-	return parts[0], os.Getpid()
+	prefix := parts[0]
+
+	workerType = "transfer"
+	if idx := strings.Index(prefix, "_"); idx >= 0 {
+		workerType = prefix[:idx]
+		hostname = prefix[idx+1:]
+	} else {
+		hostname = prefix
+	}
+
+	pid = os.Getpid()
+	return
 }
 
 func getOutboundIP() string {

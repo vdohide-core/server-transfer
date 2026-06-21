@@ -10,6 +10,8 @@ import (
 	"server-transfer/internal/logger"
 )
 
+const WorkerTypeTransfer = "transfer"
+
 func GenerateWorkerID() string {
 	if envWorkerID := os.Getenv("WORKER_ID"); envWorkerID != "" {
 		return envWorkerID
@@ -18,7 +20,7 @@ func GenerateWorkerID() string {
 	if err != nil {
 		hostname = "unknown"
 	}
-	return fmt.Sprintf("%s@1", hostname)
+	return fmt.Sprintf("%s_%s@1", WorkerTypeTransfer, hostname)
 }
 
 func RandomString(n int, special bool) string {
