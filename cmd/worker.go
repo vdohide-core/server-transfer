@@ -30,8 +30,8 @@ var allResolutions = []string{
 }
 
 func findAndClaimFile(ctx context.Context) (*models.VideoProcess, *models.File, error) {
-	if config.AppConfig.StorageId == "" {
-		return nil, nil, fmt.Errorf("STORAGE_ID not configured")
+	if reason := localStorageBlockReason(ctx); reason != "" {
+		return nil, nil, fmt.Errorf("%s", reason)
 	}
 
 	filter := bson.M{
@@ -129,8 +129,8 @@ func transferBlockReason(ctx context.Context, file *models.File) string {
 
 // logIdleDiagnostics explains why no job was claimed (logged periodically).
 func logIdleDiagnostics(ctx context.Context) {
-	if config.AppConfig.StorageId == "" {
-		log.Println("💤 Idle — STORAGE_ID not configured")
+	if reason := localStorageBlockReason(ctx); reason != "" {
+		log.Printf("💤 Idle — local storage blocked: %s (storageId=%s)", reason, config.AppConfig.StorageId)
 		return
 	}
 
@@ -215,6 +215,10 @@ func runTransfer(ctx context.Context, process *models.VideoProcess) error {
 	if storagePath == "" || storageID == "" {
 		failProcess(ctx, process.ID, slug, "STORAGE_ID or STORAGE_PATH not configured")
 		return fmt.Errorf("storage not configured")
+	}
+	if reason := localStorageBlockReason(ctx); reason != "" {
+		failProcess(ctx, process.ID, slug, reason)
+		return fmt.Errorf("%s", reason)
 	}
 
 	procLogger := utils.NewProcessLogger(slug)

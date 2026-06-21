@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"server-transfer/internal/config"
 	"server-transfer/internal/db/models"
 	"server-transfer/internal/utils"
 
@@ -22,6 +23,30 @@ func derefStr(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+const storageCapacityMaxPercent = 90.0
+
+// localStorageBlockReason returns why this worker's STORAGE_ID cannot accept jobs (empty = ok).
+func localStorageBlockReason(ctx context.Context) string {
+	storageID := config.AppConfig.StorageId
+	if storageID == "" {
+		return "storage_not_configured"
+	}
+	storage, err := models.StorageModel.FindByID(ctx, storageID)
+	if err != nil {
+		return "local_storage_not_found"
+	}
+	if !storage.Enable {
+		return "local_storage_disabled"
+	}
+	if storage.Status != models.StorageStatusOnline {
+		return "local_storage_not_online"
+	}
+	if storage.Capacity != nil && storage.Capacity.Percentage >= storageCapacityMaxPercent {
+		return "local_storage_capacity_full"
+	}
+	return ""
 }
 
 func isCancelled(ctx context.Context, processID string) bool {

@@ -104,6 +104,7 @@ func startWorkerLoop() {
 	const pollIdle = 30 * time.Second
 	idleRounds := 0
 	var lastDisabledLog time.Time
+	var lastStorageBlockLog time.Time
 
 	for {
 		if !isTransferEnabled(ctx) {
@@ -118,6 +119,14 @@ func startWorkerLoop() {
 			if time.Since(lastDisabledLog) > 5*time.Minute {
 				log.Printf("⏸️  worker %s disabled in db.workers", workerID)
 				lastDisabledLog = time.Now()
+			}
+			time.Sleep(pollIdle)
+			continue
+		}
+		if reason := localStorageBlockReason(ctx); reason != "" {
+			if time.Since(lastStorageBlockLog) > 5*time.Minute {
+				log.Printf("⏸️  local storage blocked: %s (storageId=%s)", reason, config.AppConfig.StorageId)
+				lastStorageBlockLog = time.Now()
 			}
 			time.Sleep(pollIdle)
 			continue
