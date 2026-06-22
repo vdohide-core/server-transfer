@@ -118,11 +118,11 @@ func transferBlockReason(ctx context.Context, file *models.File) string {
 
 	otherActive, _ := models.VideoProcessModel.CountDocuments(ctx, bson.M{
 		"fileId":      file.ID,
-		"processType": bson.M{"$ne": models.ProcessTypeTransfer},
+		"processType": models.ProcessTypeDownload,
 		"status":      models.ProcessStatusProcessing,
 	})
 	if otherActive > 0 {
-		return "other_service_processing"
+		return "download_processing"
 	}
 	return ""
 }
@@ -351,10 +351,23 @@ func runTransfer(ctx context.Context, process *models.VideoProcess) error {
 
 	if !hasVideoMedia(ctx, fileID, models.ResolutionOriginal) {
 		originalPath := filepath.Join(workDir, models.FileNameOriginal)
-		if _, err := os.Stat(originalPath); err != nil {
-			if hasSpriteZip && file.Status == models.FileStatusReady {
+		_, originalOnDisk := os.Stat(originalPath)
+		hasNonOriginalDownload := false
+		for _, res := range downloadedRes {
+			if res != models.ResolutionOriginal {
+				hasNonOriginalDownload = true
+				break
+			}
+		}
+		if originalOnDisk != nil {
+			switch {
+			case hasSpriteZip && file.Status == models.FileStatusReady:
 				log.Printf("🖼️  [%s] Sprite-only transfer — skipping original video re-download", slug)
-			} else {
+			case hasNonOriginalDownload:
+				log.Printf("⏭️  [%s] Partial transfer — original not ready yet, installing %v", slug, downloadedRes)
+			case len(downloadedRes) == 0 && len(transferredAssets) > 0:
+				log.Printf("⏭️  [%s] Ingest cleanup only — skipping original requirement", slug)
+			default:
 				failProcess(ctx, process.ID, slug, "file_original.mp4 not found on S3 ingest")
 				return fmt.Errorf("original missing on S3")
 			}
