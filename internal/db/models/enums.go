@@ -63,7 +63,10 @@ var ResolutionToShortSide = map[string]int{
 }
 
 const (
-	ProcessTypeTransfer = "transfer"
+	ProcessTypeDownload  = "download"
+	ProcessTypeTransfer  = "transfer"
+	ProcessTypeTranscode = "transcode"
+	ProcessTypeSpritesheet = "spritesheet"
 )
 
 const (
