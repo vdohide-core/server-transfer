@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,6 +29,110 @@ func derefStr(s *string) string {
 }
 
 const storageCapacityMaxPercent = 90.0
+const storageBalanceMarginPercent = 2.0
+
+func storageCapacityPercent(s *models.Storage) float64 {
+	if s.Capacity != nil {
+		return s.Capacity.Percentage
+	}
+	return 0
+}
+
+func listEligibleLocalStorages(ctx context.Context) ([]models.Storage, error) {
+	filter := bson.M{
+		"enable": true,
+		"status": models.StorageStatusOnline,
+		"type":   models.StorageTypeLocal,
+		"$or": []bson.M{
+			{"capacity.percentage": bson.M{"$lt": storageCapacityMaxPercent}},
+			{"capacity.percentage": bson.M{"$exists": false}},
+			{"capacity": bson.M{"$exists": false}},
+		},
+	}
+	cursor, err := models.StorageModel.FindRaw(ctx, filter, options.Find().SetSort(bson.D{
+		{Key: "capacity.percentage", Value: 1},
+		{Key: "_id", Value: 1},
+	}))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var storages []models.Storage
+	for cursor.Next(ctx) {
+		var s models.Storage
+		if err := cursor.Decode(&s); err != nil {
+			continue
+		}
+		if storageCapacityPercent(&s) >= storageCapacityMaxPercent {
+			continue
+		}
+		storages = append(storages, s)
+	}
+	return storages, cursor.Err()
+}
+
+func hashFileID(fileID string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(fileID))
+	return h.Sum32()
+}
+
+// pickBalancedStorage chooses a local storage for a new file: prefer lowest capacity,
+// spread ties deterministically via fileId hash.
+func pickBalancedStorage(ctx context.Context, fileID string) (string, error) {
+	storages, err := listEligibleLocalStorages(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(storages) == 0 {
+		return config.AppConfig.StorageId, nil
+	}
+	if len(storages) == 1 {
+		return storages[0].ID, nil
+	}
+
+	minPct := math.MaxFloat64
+	for i := range storages {
+		if pct := storageCapacityPercent(&storages[i]); pct < minPct {
+			minPct = pct
+		}
+	}
+
+	candidates := make([]models.Storage, 0, len(storages))
+	for _, s := range storages {
+		if storageCapacityPercent(&s) <= minPct+storageBalanceMarginPercent {
+			candidates = append(candidates, s)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].ID < candidates[j].ID
+	})
+
+	idx := int(hashFileID(fileID)) % len(candidates)
+	return candidates[idx].ID, nil
+}
+
+// assignedStorageForFile picks a local storage by capacity balance (fileId hash for ties).
+func assignedStorageForFile(ctx context.Context, fileID string) (string, error) {
+	return pickBalancedStorage(ctx, fileID)
+}
+
+func transferStorageAssignReason(ctx context.Context, fileID string) string {
+	myID := config.AppConfig.StorageId
+	if myID == "" {
+		return ""
+	}
+	assigned, err := assignedStorageForFile(ctx, fileID)
+	if err != nil {
+		log.Printf("⚠️  storage assign lookup failed for %s: %v", fileID, err)
+		return ""
+	}
+	if assigned != myID {
+		return "assigned_to_other_storage"
+	}
+	return ""
+}
 
 // localStorageBlockReason returns why this worker's STORAGE_ID cannot accept jobs (empty = ok).
 func localStorageBlockReason(ctx context.Context) string {

@@ -103,6 +103,10 @@ func transferBlockReason(ctx context.Context, file *models.File) string {
 		return "s3_offline"
 	}
 
+	if reason := transferStorageAssignReason(ctx, file.ID); reason != "" {
+		return reason
+	}
+
 	activeCount, _ := models.VideoProcessModel.CountDocuments(ctx, bson.M{
 		"fileId":      file.ID,
 		"processType": models.ProcessTypeTransfer,
