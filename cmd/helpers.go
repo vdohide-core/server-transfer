@@ -111,20 +111,6 @@ func updateOverallPercent(ctx context.Context, processID string, percent float64
 	}})
 }
 
-func DetermineHighestResolution(height int) int {
-	threshold := func(t int) int { return t * 95 / 100 }
-	if height >= threshold(1080) {
-		return 1080
-	}
-	if height >= threshold(720) {
-		return 720
-	}
-	if height >= threshold(480) {
-		return 480
-	}
-	return 360
-}
-
 func cloneMediaToClonedFiles(ctx context.Context, sourceFileID string, media models.Media, slug string) {
 	cursor, err := models.FileModel.FindRaw(ctx, bson.M{
 		"clonedFrom":         sourceFileID,
@@ -172,19 +158,18 @@ func cloneMediaToClonedFiles(ctx context.Context, sourceFileID string, media mod
 	}
 }
 
-func updateClonedFilesReady(ctx context.Context, sourceFileID string, highest int, slug string) {
+func updateClonedFilesReady(ctx context.Context, sourceFileID string, slug string) {
 	now := time.Now()
-	update := bson.M{"status": models.FileStatusReady, "updatedAt": now}
-	if highest > 0 {
-		update["metadata.highest"] = highest
-	}
 	result, _ := models.FileModel.UpdateMany(ctx, bson.M{
 		"clonedFrom":         sourceFileID,
 		"type":               models.FileTypeVideo,
 		"status":             models.FileStatusReadyOriginal,
 		"metadata.trashedAt": bson.M{"$exists": false},
 		"metadata.deletedAt": bson.M{"$exists": false},
-	}, bson.M{"$set": update})
+	}, bson.M{"$set": bson.M{
+		"status":    models.FileStatusReady,
+		"updatedAt": now,
+	}})
 	if result != nil && result.ModifiedCount > 0 {
 		log.Printf("📋 [%s] Updated %d cloned files → ready", slug, result.ModifiedCount)
 	}

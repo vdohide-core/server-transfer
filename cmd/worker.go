@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -399,7 +398,6 @@ func runTransfer(ctx context.Context, process *models.VideoProcess) error {
 
 	// ─── STEP 3: INSTALL to local storage path ────────────────
 	startStep(ctx, process.ID, "install")
-	highestResolution := 0
 	installedRes := make([]string, 0, len(downloadedRes))
 
 	for _, res := range downloadedRes {
@@ -413,11 +411,6 @@ func runTransfer(ctx context.Context, process *models.VideoProcess) error {
 			return err
 		}
 		installedRes = append(installedRes, res)
-		if res != models.ResolutionOriginal {
-			if resInt, err := strconv.Atoi(res); err == nil && resInt > highestResolution {
-				highestResolution = resInt
-			}
-		}
 		log.Printf("📂 [%s] Installed %s → %s/%s/", slug, fileName, storagePath, fileID)
 	}
 
@@ -493,24 +486,14 @@ func runTransfer(ctx context.Context, process *models.VideoProcess) error {
 
 	completeStep(ctx, process.ID, "media")
 
-	if highestResolution == 0 && file.Metadata != nil && file.Metadata.Highest != nil {
-		highestResolution = *file.Metadata.Highest
-	}
-	if highestResolution == 0 {
-		highestResolution = highestResolutionFromMedias(ctx, fileID)
-	}
-
-	// Mark ready when original exists on any storage (this server or another)
+	// Mark ready when original exists on any storage (metadata.highest is set by server-download)
 	if hasVideoMedia(ctx, fileID, models.ResolutionOriginal) {
 		updateFields := bson.M{"status": models.FileStatusReady, "updatedAt": now}
-		if highestResolution > 0 {
-			updateFields["metadata.highest"] = highestResolution
-		}
 		if duration > 0 {
 			updateFields["metadata.duration"] = int64(duration)
 		}
 		models.FileModel.UpdateByID(ctx, fileID, bson.M{"$set": updateFields})
-		updateClonedFilesReady(ctx, fileID, highestResolution, slug)
+		updateClonedFilesReady(ctx, fileID, slug)
 	}
 
 	updateOverallPercent(ctx, process.ID, 100)
@@ -538,18 +521,6 @@ func fileSize(path string) int64 {
 		return 0
 	}
 	return info.Size()
-}
-
-func highestResolutionFromMedias(ctx context.Context, fileID string) int {
-	highest := 0
-	for _, res := range []string{models.Resolution1080, models.Resolution720, models.Resolution480, models.Resolution360} {
-		if hasVideoMedia(ctx, fileID, res) {
-			if n, err := strconv.Atoi(res); err == nil && n > highest {
-				highest = n
-			}
-		}
-	}
-	return highest
 }
 
 func resumeOwnProcess(ctx context.Context) *models.VideoProcess {
